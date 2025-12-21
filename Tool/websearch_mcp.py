@@ -72,11 +72,11 @@ def test_web_search(query: str):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", "-p", type=int, required=True, default=8021)
+    parser.add_argument("--port", "-p", type=int, required=False, default=8021)
     args = parser.parse_args()
     
     print(f"Starting MCP Web Extract Server on port {args.port}...")
-    asyncio.run(mcp.run_sse_async(host="0.0.0.0", port=args.port))
+    asyncio.run(mcp.run_http_async(host="0.0.0.0", port=args.port))
     # print("test")
     # result = test_web_search("絕區零 最新角色")
     # print(result)

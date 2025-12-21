@@ -1,8 +1,12 @@
 import asyncio
 import datetime
+import json
 import os
 import random
 import time
+import base64
+import io
+import pyautogui
 from contextlib import AsyncExitStack
 from typing import Optional, Any, Dict
 
@@ -18,7 +22,10 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import ToolContext, BaseTool
-from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, SseConnectionParams
+from google.adk.tools.mcp_tool.mcp_toolset import (
+    McpToolset,
+    StreamableHTTPConnectionParams,
+)
 from google.genai import types
 from mcp import StdioServerParameters
 from openpyxl.reader.excel import load_workbook
@@ -263,14 +270,14 @@ async def get_agent_async(conversation_id: str):
 
     root_agent = LlmAgent(
         model=MODEL,
-        name="GOOGLE的走狗",
+        name="GOOGLE好朋友",
         instruction="""
-你是一位擅長使用工具的助手。
+你是一位擅長使用工具的助手。請注意每個訊息的新鮮度與現在時間
 """,
         tools=[
-            MCPToolset(
-                connection_params=SseConnectionParams(
-                    url=f"http://127.0.0.1:{current_port}/sse"
+            McpToolset(
+                connection_params=StreamableHTTPConnectionParams(
+                    url=f"http://127.0.0.1:{current_port}/mcp",
                 ),
             ) for tool_name, _, tool_py_loc, current_port in mcp_server_port
         ],
@@ -288,6 +295,27 @@ async def get_agent_async(conversation_id: str):
 
 # --- Step 2: Main Execution Logic ---
 
+
+def get_screenshot_part():
+    """擷取螢幕並轉換為 types.Part"""
+    try:
+        screenshot = pyautogui.screenshot()
+        # 縮小圖片以節省 token 並符合 API 限制 (可選)
+        screenshot.thumbnail((1280, 1280))
+        
+        buffered = io.BytesIO()
+        screenshot.save(buffered, format="JPEG", quality=70)
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        
+        return types.Part(
+            inline_data=types.Blob(
+                mime_type="image/jpeg",
+                data=img_str
+            )
+        )
+    except Exception as e:
+        print(f"截圖失敗: {e}")
+        return None
 
 async def invoke(querys: list, index):
     global start_stream_time, end_stream_time, log_records
@@ -311,8 +339,17 @@ async def invoke(querys: list, index):
         )
 
         index += 1
-        content = types.Content(
-            role='user', parts=[types.Part(text=query)])
+        query = query + f" now_time : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        parts = [types.Part(text=query)]
+        
+        # 取得螢幕截圖並加入 parts
+        screenshot_part = get_screenshot_part()
+        if screenshot_part:
+            parts.append(screenshot_part)
+            print("已加入螢幕截圖")
+
+        content = types.Content(role='user', parts=parts)
         print(f"User Query: '{query}'")
 
         print("Running agent...")
@@ -336,7 +373,33 @@ async def invoke(querys: list, index):
                         f"呼叫工具={event.content.parts[0].function_call.name}||傳入參數:{event.content.parts[0].function_call.args}\n=====================================================")
                 elif event.content.parts[0].function_response is not None:
                     # 取出回來的東西 目前都是文字 後續應該可以改用part去改成FunctionResponse的格式
-                    tmp = event.content.parts[0].function_response.response["result"].content[0].text
+                    function_response = event.content.parts[0].function_response
+                    response_payload = function_response.response
+                    result_payload = (
+                        response_payload.get("result", response_payload)
+                        if isinstance(response_payload, dict)
+                        else response_payload
+                    )
+
+                    tmp = None
+                    if isinstance(result_payload, dict):
+                        content = result_payload.get("content")
+                        if isinstance(content, list) and content:
+                            first = content[0]
+                            if isinstance(first, dict) and "text" in first:
+                                tmp = first["text"]
+                    elif getattr(result_payload, "content", None):
+                        first = result_payload.content[0]
+                        tmp = getattr(first, "text", None) or str(first)
+
+                    if tmp is None:
+                        try:
+                            tmp = json.dumps(result_payload, ensure_ascii=False, default=str)
+                        except Exception:
+                            tmp = str(result_payload)
+
+                    if len(tmp) > 2000:
+                        tmp = tmp[:2000] + "...(truncated)"
                     print(
                         f"工具回應={event.content.parts[0].function_response.name}||回傳結果:{tmp}\n=====================================================")
                 elif event.partial and event.content.parts[0].text not in ["", " ", "\\n"]:
@@ -345,10 +408,10 @@ async def invoke(querys: list, index):
                         start_stream_flag = False
 
                     token_count += 1
-                    print(event.content.parts[0].text, end="")
-                    # for c in event.content.parts[0].text:
-                    #     print(c, end="", flush=True)'
-                    #     await asyncio.sleep(0.01)
+                    # print(event.content.parts[0].text, end="")
+                    for c in event.content.parts[0].text:
+                        print(c, end="", flush=True)
+                        await asyncio.sleep(0.01)
 
                 elif not event.partial:
                     # print(f"{event=}")
@@ -362,7 +425,7 @@ async def invoke(querys: list, index):
 if __name__ == '__main__':
 
     asyncio.get_event_loop().run_until_complete(
-        invoke(querys=["你好 幫我去看一下絕區零 目前最新的角色是誰?"], index=0))
+        invoke(querys=["台灣的張文 最近是有甚麼事情嗎?"], index=0))
     #     asyncio.get_event_loop().run_until_complete(invoke(querys=question_set, index=0))
 
     # except Exception as e:

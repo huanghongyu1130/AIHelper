@@ -1,10 +1,15 @@
 import sys
+import os
 import threading
+import asyncio
 import speech_recognition as sr
-import keyboard  # 用於監聽全域熱鍵
+import ctypes # 使用 ctypes 呼叫 Win32 API 進行按鍵輪詢
+import time
 from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QGraphicsDropShadowEffect
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from agent import get_agent_async, Runner, InMemorySessionService, InMemoryArtifactService, RunConfig, StreamingMode, types
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QConicalGradient, QBrush, QLinearGradient, QPixmap, QImage
+from agent import get_screenshot_part
 
 class ScreenGlowOverlay(QWidget):
     """全螢幕邊框發光特效視窗 (霓虹波浪 + 漸層淡入淡出版)"""
@@ -144,6 +149,11 @@ class VoiceAssistantWidget(QWidget):
         # 初始化全螢幕特效
         self.overlay = ScreenGlowOverlay()
         
+        # 初始化 AI Agent 相關組件
+        self.agent = None
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self._run_async_loop, daemon=True).start()
+        
         self.listening = False
         self.vad_mode = False  # VAD 模式狀態
         self.vad_thread_running = False # 避免重複啟動 VAD 執行緒
@@ -154,6 +164,10 @@ class VoiceAssistantWidget(QWidget):
         # 啟動背景熱鍵監聽
         self.start_hotkey_listener()
 
+    def _run_async_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
     def initUI(self):
         # 1. 設定視窗屬性：無邊框、永遠在最上層
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
@@ -162,11 +176,15 @@ class VoiceAssistantWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # 3. 調整視窗大小 (稍微加大以容納發光特效)
-        self.resize(240, 140)
+        # 改用 setMinimumSize 避免在高 DPI 下被內容撐開導致幾何設定錯誤
+        self.setMinimumWidth(240)
+        self.setMaximumWidth(600) # 限制最大寬度，強制長文字換行
 
         # 4. 主要佈局 (包含邊距，讓陰影不會被切掉)
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(20, 20, 20, 20)
+        # 讓視窗大小根據內容自動調整 (最小與最大尺寸限制內)
+        main_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinAndMaxSize)
 
         # 5. 內容容器 (原本的介面樣式移到這裡)
         self.container = QWidget()
@@ -190,13 +208,15 @@ class VoiceAssistantWidget(QWidget):
         main_layout.addWidget(self.container)
         self.setLayout(main_layout)
 
-        # 將視窗移動到螢幕右下角
+        # 將視窗移動到螢幕左上角
         screen_geometry = QApplication.primaryScreen().availableGeometry()
-        self.move(screen_geometry.width() - 260, screen_geometry.height() - 190)
+        self.move(20, 20)
 
     def update_status(self, text):
         """更新 UI 顯示文字"""
         self.label.setText(text)
+        # 強制調整視窗大小以適應新文字
+        self.adjustSize()
         
         # 判斷是否為「活躍狀態」 (錄音中 或 VAD待命中 或 轉譯中)
         is_active = "聆聽中" in text or "VAD 待命中" in text or "轉譯中" in text
@@ -233,6 +253,55 @@ class VoiceAssistantWidget(QWidget):
 
         self.show()
 
+    async def process_with_ai(self, text):
+        """將辨識出的文字送交 AI 處理"""
+        try:
+            if self.agent is None:
+                self.status_signal.emit("🤖 正在初始化 AI...")
+                self.agent = await get_agent_async("voice_session")
+            
+            self.status_signal.emit("🤖 AI 思考中...")
+            
+            session_service = InMemorySessionService()
+            artifacts_service = InMemoryArtifactService()
+            session = await session_service.create_session(state={}, app_name='voice_app', user_id="user")
+            
+            runner = Runner(
+                app_name='voice_app',
+                agent=self.agent,
+                artifact_service=artifacts_service,
+                session_service=session_service,
+            )
+            
+            parts = [types.Part(text=text)]
+            
+            # 在語音對話時也自動加入截圖
+            screenshot_part = get_screenshot_part()
+            if screenshot_part:
+                parts.append(screenshot_part)
+            
+            content = types.Content(role='user', parts=parts)
+            full_response = ""
+            
+            async for event in runner.run_async(
+                session_id=session.id,
+                user_id=session.user_id,
+                new_message=content,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE, max_llm_calls=10)
+            ):
+                if event.content and event.partial:
+                    text_part = event.content.parts[0].text
+                    if text_part:
+                        full_response += text_part
+                        # 實時更新顯示內容
+                        self.status_signal.emit(f"🤖 AI：{full_response}")
+                elif not event.partial and event.content:
+                    # 最終回應完成
+                    pass
+
+        except Exception as e:
+            self.status_signal.emit(f"⚠️ AI 錯誤: {e}")
+
     def start_voice_recognition(self):
         """真正的語音識別邏輯"""
         if self.vad_mode:
@@ -242,42 +311,33 @@ class VoiceAssistantWidget(QWidget):
         if self.listening: return
         self.listening = True
         
-        # 1. 告訴使用者開始了
-        self.status_signal.emit("🔴 聆聽中...請說話")
-        
-        # 2. 初始化辨識器
-        r = sr.Recognizer()
-        
-        try:
-            with sr.Microphone() as source:
-                # 自動調整環境噪音 (建議加上這行，辨識會比較準)
-                r.adjust_for_ambient_noise(source, duration=0.5)
-                
-                # 開始錄音 (這裡會卡住等待你說話結束)
-                audio = r.listen(source, timeout=5, phrase_time_limit=10)
-                
-                self.status_signal.emit("🔄 轉譯中...")
+        def recognition_thread():
+            self.status_signal.emit("🔴 聆聽中...請說話")
+            r = sr.Recognizer()
+            try:
+                with sr.Microphone() as source:
+                    r.adjust_for_ambient_noise(source, duration=0.5)
+                    audio = r.listen(source, timeout=5, phrase_time_limit=10)
+                    self.status_signal.emit("🔄 轉譯中...")
+                    text = r.recognize_google(audio, language="zh-TW")
+                    self.status_signal.emit(f"你說：{text}")
+                    
+                    # 異步呼叫 AI 處理
+                    asyncio.run_coroutine_threadsafe(self.process_with_ai(text), self.loop)
 
-                # 3. 呼叫 Google 語音辨識 (需連網)
-                # language="zh-TW" 是關鍵，設定為繁體中文
-                text = r.recognize_google(audio, language="zh-TW")
-                
-                # 4. 【關鍵】將辨識到的文字發送到介面顯示
-                self.status_signal.emit(f"你說：{text}")
-                
-                # 這裡你可以順便把 text 拿去做其他事 (例如輸入到電腦)
-                # print(f"辨識結果: {text}")
+            except sr.UnknownValueError:
+                self.status_signal.emit("❌ 無法辨識 (聽不清楚)")
+                threading.Timer(3.0, lambda: self.status_signal.emit("等待呼叫...")).start()
+            except sr.RequestError:
+                self.status_signal.emit("⚠️ 網路錯誤")
+                threading.Timer(3.0, lambda: self.status_signal.emit("等待呼叫...")).start()
+            except Exception as e:
+                self.status_signal.emit(f"⚠️ 錯誤: {e}")
+                threading.Timer(3.0, lambda: self.status_signal.emit("等待呼叫...")).start()
+            finally:
+                self.listening = False
 
-        except sr.UnknownValueError:
-            self.status_signal.emit("❌ 無法辨識 (聽不清楚)")
-        except sr.RequestError:
-            self.status_signal.emit("⚠️ 網路錯誤或 API 連線失敗")
-        except Exception as e:
-            self.status_signal.emit(f"⚠️ 錯誤: {e}")
-        finally:
-            self.listening = False
-            # 設定 5 秒後變回「等待呼叫」，不然文字會一直留在上面
-            threading.Timer(5.0, lambda: self.status_signal.emit("等待呼叫...")).start()
+        threading.Thread(target=recognition_thread, daemon=True).start()
 
     def toggle_vad_mode(self):
         """切換 VAD 模式"""
@@ -317,6 +377,8 @@ class VoiceAssistantWidget(QWidget):
                         try:
                             text = r.recognize_google(audio, language="zh-TW")
                             self.status_signal.emit(f"你說：{text}")
+                            # VAD 模式也串接 AI
+                            asyncio.run_coroutine_threadsafe(self.process_with_ai(text), self.loop)
                         except sr.UnknownValueError:
                             pass
                         except sr.RequestError:
@@ -339,21 +401,53 @@ class VoiceAssistantWidget(QWidget):
             self.vad_thread_running = False
 
     def start_hotkey_listener(self):
-        """在背景執行緒監聽鍵盤"""
+        """在背景執行緒使用 GetAsyncKeyState 輪詢監聽鍵盤"""
         def check_key():
-            # 設定熱鍵為 Ctrl + Shift + V
-            keyboard.add_hotkey('/', self.start_voice_recognition)
-            # 設定 VAD 切換熱鍵為 F12
-            keyboard.add_hotkey('f12', self.toggle_vad_mode)
-            # 設定退出熱鍵為 Ctrl + Shift + Esc
-            keyboard.add_hotkey('esc', lambda: QApplication.instance().quit())
-            keyboard.wait()
+            # 定義虛擬鍵碼 (Virtual-Key Codes)
+            VK_OEM_2 = 0xBF # '/?' 鍵
+            VK_DIVIDE = 0x6F # 數字鍵盤 '/' 鍵
+            VK_F12 = 0x7B
+            VK_ESCAPE = 0x1B
+            
+            while True:
+                try:
+                    # 檢查 '/' 鍵 (主鍵盤或數字鍵盤)
+                    if (ctypes.windll.user32.GetAsyncKeyState(VK_OEM_2) & 0x8000) or \
+                       (ctypes.windll.user32.GetAsyncKeyState(VK_DIVIDE) & 0x8000):
+                        # 呼叫語音辨識
+                        # 使用 QTimer.singleShot 在主執行緒觸發，避免執行緒安全問題
+                        # 但這裡原本邏輯是直接呼叫，且 start_voice_recognition 內部有鎖，暫時保持直接呼叫
+                        if not self.listening and not self.vad_mode:
+                            self.start_voice_recognition()
+                            time.sleep(0.5) # 簡單防抖動
+                    
+                    # 檢查 F12
+                    elif ctypes.windll.user32.GetAsyncKeyState(VK_F12) & 0x8000:
+                        self.toggle_vad_mode()
+                        time.sleep(0.5) # 簡單防抖動
+                        
+                    # 檢查 ESC (退出)
+                    elif ctypes.windll.user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+                        QApplication.instance().quit()
+                        break
+                        
+                    time.sleep(0.05) # 20Hz 採樣率，降低 CPU 使用率
+                except Exception as e:
+                    print(f"Hotkey Error: {e}")
+                    time.sleep(1)
 
         t = threading.Thread(target=check_key, daemon=True)
         t.start()
 
 if __name__ == '__main__':
+    # 解決 DPI 縮放問題
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    
     app = QApplication(sys.argv)
+    
+    # 設定 DPI 縮放策略
+    app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    
     ex = VoiceAssistantWidget()
     ex.show()
     sys.exit(app.exec())

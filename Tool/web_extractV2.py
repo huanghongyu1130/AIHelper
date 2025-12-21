@@ -372,4 +372,4 @@ if __name__ == "__main__":
     print(f"Starting MCP Web Extract Server on port {args.port}...")
     # 注意：FastMCP 的 run_sse_async 會接管 Event Loop
     # 我們不在此顯式呼叫 startup，依賴 Tool 內的 Lazy Loading
-    asyncio.run(mcp.run_sse_async(host="0.0.0.0", port=args.port))
+    asyncio.run(mcp.run_http_async(host="0.0.0.0", port=args.port))
