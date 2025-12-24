@@ -6,9 +6,11 @@ from time import time
 envs = os.environ.copy()
 
 servers = [
-    #   工具名稱,    檔案位置記得加.py,   PORT號(請確認與檔案中的main相同)
-    ("web_search","", "Tool/websearch_mcp.py", 8002),
-    ("web_extract","", "Tool/web_extractV2.py", 8003),
+    #   工具名稱,    執行程式(空=python),   檔案位置記得加.py,   PORT號
+    ("web_search", "", "Tool/websearch_mcp.py", 8002),
+    ("web_extract", "", "Tool/web_extractV2.py", 8003),
+    ("knowledge", "", "Tool/knowledge_mcp.py", 8022),  # 知識庫查詢工具
+    ("vector_search", "", "Tool/vector_search_mcp.py", 8023),  # 向量語義搜尋工具
 ]
 
 async def run_server(name,exc, script_or_args, port):

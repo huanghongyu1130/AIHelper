@@ -272,7 +272,30 @@ async def get_agent_async(conversation_id: str):
         model=MODEL,
         name="GOOGLE好朋友",
         instruction="""
-你是一位擅長使用工具的助手。請注意每個訊息的新鮮度與現在時間
+你是一位擅長使用工具的助手。請注意每個訊息的新鮮度與現在時間，回答時不用再提及現在時間。
+
+## 知識搜尋工具使用指南
+
+你有兩個知識搜尋工具可用：
+
+### 1. vector_search (語義搜尋)
+- **用途**: 當你需要找「相關」或「類似」的知識時使用
+- **例子**: 「深度學習和機器學習有什麼關係?」、「AI 技術有哪些?」
+- **特點**: 即使用詞不完全匹配也能找到語義相關的結果
+
+### 2. knowledge_search (精確搜尋)
+- **用途**: 當你需要找「特定」實體或「精確」關鍵字時使用
+- **例子**: 「Python 這個實體的描述是什麼?」、「查詢包含'機器學習'的所有關係」
+- **特點**: 只返回完全匹配關鍵字的結果
+
+### 選擇建議
+- 用戶問題比較模糊時 → 優先使用 vector_search
+- 用戶指定具體名詞時 → 優先使用 knowledge_search
+- 需要獲取知識庫概覽時 → 使用 get_all_knowledge 或 get_knowledge_summary
+
+## 其他工具
+- web_search: 網頁搜尋，用於獲取最新資訊
+- web_extract: 網頁內容提取，自行判斷是否需要取得更詳細資料
 """,
         tools=[
             McpToolset(
@@ -319,7 +342,7 @@ def get_screenshot_part():
 
 async def invoke(querys: list, index):
     global start_stream_time, end_stream_time, log_records
-
+    end_stream_time =""
     root_agent = await get_agent_async("123")
     print(root_agent.model)
 
@@ -408,24 +431,24 @@ async def invoke(querys: list, index):
                         start_stream_flag = False
 
                     token_count += 1
-                    # print(event.content.parts[0].text, end="")
-                    for c in event.content.parts[0].text:
-                        print(c, end="", flush=True)
-                        await asyncio.sleep(0.01)
+                    print(event.content.parts[0].text, end="")
+                    # for c in event.content.parts[0].text:
+                    #     print(c, end="", flush=True)
+                    #     await asyncio.sleep(0.01)
 
                 elif not event.partial:
                     # print(f"{event=}")
                     end_stream_time = time.time()
-                    print(f"\n\n總共花費時間:{end_stream_time - start_stream_time}")
-                    print(f"總共花費token:{token_count}")
-                    print(f"總共花費次數:{call_count}")
+        print(f"\n\n總共花費時間:{end_stream_time - start_stream_time}")
+        print(f"總共花費token:{token_count}")
+        print(f"總共花費次數:{call_count}")
 
 
 
 if __name__ == '__main__':
 
     asyncio.get_event_loop().run_until_complete(
-        invoke(querys=["台灣的張文 最近是有甚麼事情嗎?"], index=0))
+        invoke(querys=["台灣的張文 最近是有甚麼事情嗎?，越詳細越好"], index=0))
     #     asyncio.get_event_loop().run_until_complete(invoke(querys=question_set, index=0))
 
     # except Exception as e:

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智能助手</title>
+    <meta name="description" content="智能AI助手，即時問答對話">
+    <link rel="stylesheet" href="/static/styles.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap"
+        rel="stylesheet">
+    <!-- 引入 vis-network 用於知識圖譜 -->
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- 背景裝飾 -->
+        <div class="bg-decoration">
+            <div class="orb orb-1"></div>
+            <div class="orb orb-2"></div>
+            <div class="orb orb-3"></div>
+        </div>
+
+        <!-- 側邊欄 -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon">✨</span>
+                    <h1 class="sidebar-title">AI 助手</h1>
+                </div>
+                <button class="sidebar-toggle" onclick="toggleSidebar()" title="收起/展開側邊欄">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M15 18l-6-6 6-6" />
+                    </svg>
+                </button>
+            </div>
+
+            <nav class="sidebar-nav">
+                <button class="nav-item active" onclick="switchView('chat')">
+                    <span class="nav-icon">💬</span>
+                    <span class="nav-text">對話</span>
+                </button>
+                <button class="nav-item" onclick="switchView('upload')">
+                    <span class="nav-icon">📄</span>
+                    <span class="nav-text">文件上傳</span>
+                </button>
+                <button class="nav-item" onclick="switchView('graph')">
+                    <span class="nav-icon">🕸️</span>
+                    <span class="nav-text">知識圖譜</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <button class="footer-icon-btn" onclick="toggleTheme()" title="切換模式">
+                    <span id="themeIcon">🌙</span>
+                </button>
+                <button class="footer-icon-btn" onclick="toggleSettingsModal()" title="LLM 設定">
+                    <span>⚙️</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- 主要內容區域 -->
+        <div class="main-content">
+            <!-- 聊天視圖 -->
+            <div class="chat-container view-section active" id="chatView">
+                <!-- 標題區 -->
+                <header class="chat-header">
+                    <div class="header-content">
+                        <div class="mobile-menu-btn" onclick="toggleSidebar()">☰</div>
+                        <div class="header-title">
+                            <h2>對話</h2>
+                        </div>
+                        <div class="connection-status" id="connectionStatus">
+                            <span class="status-dot"></span>
+                            <span class="status-text">連接中...</span>
+                        </div>
+                    </div>
+                </header>
+
+                <!-- 訊息區域 -->
+                <main class="chat-messages" id="chatMessages">
+                    <div class="welcome-message">
+                        <h2>歡迎使用 AI 智能助手</h2>
+                        <p>我可以幫助您回答問題、提供資訊、協助完成各種任務。</p>
+                        <div class="quick-actions">
+                            <button class="quick-btn" onclick="sendQuickMessage('你能做什麼？')">你能做什麼？</button>
+                            <button class="quick-btn" onclick="sendQuickMessage('今天天氣如何？')">今天天氣如何？</button>
+                            <button class="quick-btn" onclick="sendQuickMessage('給我一些靈感')">給我一些靈感</button>
+                        </div>
+                    </div>
+                </main>
+
+                <!-- 輸入區域 -->
+                <footer class="chat-input-area">
+                    <!-- 圖片預覽區域 -->
+                    <div class="image-preview-container" id="imagePreviewContainer"></div>
+
+                    <div class="input-container">
+                        <!-- 隱藏的圖片上傳 input -->
+                        <input type="file" id="imageInput" accept="image/*" multiple style="display: none;"
+                            onchange="handleImageSelect(event)">
+
+                        <!-- 圖片上傳按鈕 -->
+                        <button class="upload-btn" onclick="document.getElementById('imageInput').click()" title="上傳圖片">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                <circle cx="8.5" cy="8.5" r="1.5" />
+                                <polyline points="21 15 16 10 5 21" />
+                            </svg>
+                        </button>
+
+                        <textarea id="messageInput" placeholder="輸入您的訊息... (可使用 Ctrl+V 貼上圖片)" rows="1"
+                            onkeydown="handleKeyDown(event)" oninput="autoResize(this)"></textarea>
+                        <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z" />
+                            </svg>
+                        </button>
+                    </div>
+                </footer>
+            </div>
+
+            <!-- 文件上傳視圖 -->
+            <div class="upload-container view-section" id="uploadView">
+                <header class="chat-header">
+                    <div class="header-content">
+                        <div class="mobile-menu-btn" onclick="toggleSidebar()">☰</div>
+                        <div class="header-title">
+                            <h2>文件上傳</h2>
+                        </div>
+                        <div class="upload-stats" id="uploadStats">
+                            <span class="stats-item">📁 <span id="totalDocs">0</span> 份文件</span>
+                        </div>
+                    </div>
+                </header>
+
+                <div class="upload-content">
+                    <!-- 拖放上傳區域 -->
+                    <div class="upload-dropzone" id="uploadDropzone">
+                        <div class="dropzone-icon">📤</div>
+                        <h3>拖放 PDF 文件至此處</h3>
+                        <p>或點擊選擇文件</p>
+                        <input type="file" id="pdfInput" accept=".pdf" multiple style="display: none;">
+                        <button class="upload-select-btn" onclick="document.getElementById('pdfInput').click()">
+                            選擇文件
+                        </button>
+                    </div>
+
+                    <!-- 文件列表 -->
+                    <div class="document-list" id="documentList">
+                        <h3 class="list-title">📋 已上傳文件</h3>
+                        <div class="document-items" id="documentItems">
+                            <!-- 動態生成文件項目 -->
+                            <div class="empty-state" id="emptyDocState">
+                                <span class="empty-icon">📭</span>
+                                <p>尚未上傳任何文件</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 知識圖譜視圖 -->
+            <div class="graph-container view-section" id="graphView">
+                <header class="chat-header">
+                    <div class="header-content">
+                        <div class="mobile-menu-btn" onclick="toggleSidebar()">☰</div>
+                        <div class="header-title">
+                            <h2>知識圖譜</h2>
+                        </div>
+                        <div class="graph-controls">
+                            <button class="control-btn" onclick="refreshGraph()">🔄 重新整理</button>
+                        </div>
+                    </div>
+                </header>
+                <!-- 統計信息欄 -->
+                <div class="graph-stats-bar" id="graphStatsBar">
+                    <div class="stat-item">
+                        <span class="stat-icon">📄</span>
+                        <span class="stat-label">文件</span>
+                        <span class="stat-value" id="statDocuments">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-icon">🔵</span>
+                        <span class="stat-label">節點</span>
+                        <span class="stat-value" id="statNodes">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-icon">🔗</span>
+                        <span class="stat-label">關係</span>
+                        <span class="stat-value" id="statEdges">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-icon">🎯</span>
+                        <span class="stat-label">向量</span>
+                        <span class="stat-value" id="statVectors">0</span>
+                    </div>
+                    <div class="stat-item status">
+                        <span class="stat-icon">📊</span>
+                        <span class="stat-label">Qdrant</span>
+                        <span class="stat-value status-badge" id="statQdrantStatus">--</span>
+                    </div>
+                </div>
+                <div id="knowledgeGraph" class="graph-canvas"></div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- 設定模態框 -->
+    <div class="modal-overlay" id="settingsModal">
+        <div class="modal-container">
+            <div class="modal-header">
+                <h3>LLM 配置設定</h3>
+                <button class="close-btn" onclick="toggleSettingsModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="llmModel">模型選擇</label>
+                    <select id="llmModel" class="form-control">
+                        <option value="gpt-4">GPT-4</option>
+                        <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                        <option value="gemini-pro">Gemini Pro</option>
+                        <option value="claude-3">Claude 3</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="llmTemperature">Temperature (隨機性)</label>
+                    <div class="range-container">
+                        <input type="range" id="llmTemperature" min="0" max="1" step="0.1" value="0.7"
+                            oninput="updateRangeValue(this, 'tempValue')">
+                        <span id="tempValue">0.7</span>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="llmApiKey">API Key</label>
+                    <input type="password" id="llmApiKey" class="form-control" placeholder="請輸入 API Key">
+                </div>
+                <div class="form-group">
+                    <label for="systemPrompt">系統提示詞 (System Prompt)</label>
+                    <textarea id="systemPrompt" class="form-control" rows="3"
+                        placeholder="設定 AI 的角色與行為...">你是一位專業的 AI 助手。</textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="toggleSettingsModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveSettings()">儲存設定</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+
+</html>

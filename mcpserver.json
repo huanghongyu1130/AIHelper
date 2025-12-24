@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "web_search": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8002/mcp",
+      "command": "python",
+      "args": ["Tool/websearch_mcp.py", "--port", "8002"]
+    },
+    "web_extract": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8003/mcp",
+      "command": "python",
+      "args": ["Tool/web_extractV2.py", "--port", "8003"]
+    }
+  }
+}

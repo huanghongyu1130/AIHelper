@@ -35,12 +35,14 @@ async def web_search(query: str = Field(..., description="放入需要查詢的�
             else:
                 all_hits += s.text(f'{query}', max_results=5,
                                     region="tw-tzh", backend="yahoo")
-            pp.pp(all_hits)
+            # 使用安全的方式輸出結果數量（避免 Unicode 編碼問題）
+            print(f"[WebSearch] Found {len(all_hits)} results")
 
         return WebSearchOutput(type="text", result=all_hits)
 
     except Exception as e:
-        return {"error": f"網頁搜尋時發生錯誤: {e}"}
+        error_msg = str(e).encode('ascii', 'replace').decode('ascii')
+        return {"error": f"網頁搜尋時發生錯誤: {error_msg}"}
 
 
 def test_web_search(query: str):
