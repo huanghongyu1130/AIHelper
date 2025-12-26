@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, List
+from Tool.text_processing import recursive_character_text_splitter
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +19,8 @@ from fastapi.responses import FileResponse
 # 嘗試導入 agent.py，如果失敗則使用模擬模式
 MOCK_MODE = False
 KAG_AGENT_AVAILABLE = False
+PORT = 8765
+
 
 try:
     from agent import (
@@ -320,12 +323,9 @@ def extract_text_from_pdf(pdf_content: bytes) -> str:
 
 
 async def extract_knowledge_with_llm(text: str, document_name: str) -> dict:
-    """使用 LLM 從文本中提取知識 (實體和關係)"""
+    """使用 LLM 從文本中提取知識 (實體和關係) - 支援分塊處理長文檔"""
     
-    # 如果文本太長，只取前 4000 字符
-    text_chunk = text[:4000] if len(text) > 4000 else text
-    
-    if MOCK_MODE or not text_chunk.strip():
+    if MOCK_MODE or not text.strip():
         # 模擬模式：根據文檔名稱生成模擬知識
         mock_entities = [
             {"name": f"{document_name[:10]}概念1", "type": "concept", "description": "從文檔提取的概念"},
@@ -340,23 +340,28 @@ async def extract_knowledge_with_llm(text: str, document_name: str) -> dict:
             "relations": mock_relations
         }
     
+    # === 分塊處理長文檔 ===
+    CHUNK_SIZE = 4000  # 每個 chunk 的字符數
+    CHUNK_OVERLAP = 200  # chunk 之間的重疊字符數
+    
+    # 將文本分成多個 chunks
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + CHUNK_SIZE
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk)
+        start = end - CHUNK_OVERLAP  # 重疊以避免在實體中間切斷
+    
+    print(f"📄 文檔分成 {len(chunks)} 個塊進行處理")
+    
+    # 收集所有 chunks 的提取結果
+    all_entities = []
+    all_relations = []
+    
     # 真實模式：使用 AI Agent 提取知識
     try:
-        prompt = f"""請從以下文檔內容中提取知識圖譜信息，只提取最重要的 3-5 個實體。
-
-文檔名稱: {document_name}
-
-文檔內容(節錄):
-{text_chunk[:2000]}
-
-請以 JSON 格式返回，包含兩個數組:
-1. entities: 實體列表(最多5個)，每個實體包含 name(名稱), type(類型: concept/entity/tech), description(簡短描述)
-2. relations: 關係列表，每個關係包含 from(起始實體名), to(目標實體名), relation(關係類型)
-
-只返回純 JSON，不要 markdown 代碼塊，不要其他說明文字。
-格式示例: {{"entities": [{{"name": "概念A", "type": "concept", "description": "描述"}}], "relations": []}}
-"""
-        
         # 使用 KAG Agent (來自 agents 模組)
         if KAG_AGENT_AVAILABLE:
             agent = await get_kag_agent_async()
@@ -380,55 +385,105 @@ async def extract_knowledge_with_llm(text: str, document_name: str) -> dict:
             session_service=session_service,
         )
         
-        content = types.Content(
-            role='user',
-            parts=[types.Part(text=prompt)]
-        )
+        # 處理每個 chunk
+        for i, chunk in enumerate(chunks):
+            print(f"  處理第 {i+1}/{len(chunks)} 塊...")
+            
+            prompt = f"""請從以下文本中提取知識圖譜信息。
+請全面提取文中出現的所有重要實體(概念、技術、人物、組織、方法等)以及它們之間的關係。
+不要有數量限制，盡可能提取所有有價值的知識點。
+
+文檔名稱: {document_name}
+區塊編號: {i+1}/{len(chunks)}
+
+文本內容:
+{chunk}
+
+請以 JSON 格式返回，包含兩個數組:
+1. entities: 實體列表，每個實體包含 name(名稱), type(類型: concept/entity/tech/person/org/model), description(簡短描述)
+2. relations: 關係列表，每個關係包含 from(起始實體名), to(目標實體名), relation(關係類型)
+
+只返回純 JSON，不要 markdown 代碼塊，不要其他說明文字。
+格式示例: {{"entities": [{{"name": "概念A", "type": "concept", "description": "描述"}}], "relations": []}}
+"""
+            
+            content = types.Content(
+                role='user',
+                parts=[types.Part(text=prompt)]
+            )
+            
+            response_text = ""
+            async for event in runner.run_async(
+                session_id=session.id,
+                user_id=session.user_id,
+                new_message=content,
+                run_config=RunConfig(streaming_mode=StreamingMode.NONE, max_llm_calls=5)
+            ):
+                if event.content and event.content.parts[0].text:
+                    response_text += event.content.parts[0].text
+            
+            # 嘗試解析 JSON
+            try:
+                start_idx = response_text.find('{')
+                if start_idx != -1:
+                    # 計算括號平衡來找到正確的結束位置
+                    depth = 0
+                    end_idx = start_idx
+                    for j, char in enumerate(response_text[start_idx:], start_idx):
+                        if char == '{':
+                            depth += 1
+                        elif char == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end_idx = j + 1
+                                break
+                    
+                    json_str = response_text[start_idx:end_idx]
+                    result = json.loads(json_str)
+                    
+                    # 收集實體和關係
+                    chunk_entities = result.get("entities", [])
+                    chunk_relations = result.get("relations", [])
+                    
+                    all_entities.extend(chunk_entities)
+                    all_relations.extend(chunk_relations)
+                    
+                    print(f"    ✓ 提取到 {len(chunk_entities)} 個實體, {len(chunk_relations)} 個關係")
+                    
+            except json.JSONDecodeError as je:
+                print(f"    ⚠ JSON 解析錯誤: {je}")
         
-        response_text = ""
-        async for event in runner.run_async(
-            session_id=session.id,
-            user_id=session.user_id,
-            new_message=content,
-            run_config=RunConfig(streaming_mode=StreamingMode.NONE, max_llm_calls=5)
-        ):
-            if event.content and event.content.parts[0].text:
-                response_text += event.content.parts[0].text
+        # === 去重合併 ===
+        # 根據實體名稱去重
+        seen_entities = {}
+        for entity in all_entities:
+            name = entity.get("name", "")
+            if name and name not in seen_entities:
+                seen_entities[name] = entity
         
-        # 嘗試解析 JSON - 更穩健的方式
-        import re
+        unique_entities = list(seen_entities.values())
         
-        # 先嘗試找到包含 entities 和 relations 的 JSON
-        try:
-            # 找到第一個 { 和最後一個 } 之間的內容
-            start_idx = response_text.find('{')
-            if start_idx != -1:
-                # 計算括號平衡來找到正確的結束位置
-                depth = 0
-                end_idx = start_idx
-                for i, char in enumerate(response_text[start_idx:], start_idx):
-                    if char == '{':
-                        depth += 1
-                    elif char == '}':
-                        depth -= 1
-                        if depth == 0:
-                            end_idx = i + 1
-                            break
-                
-                json_str = response_text[start_idx:end_idx]
-                result = json.loads(json_str)
-                
-                # 確保有必要的鍵
-                if 'entities' in result or 'relations' in result:
-                    return {
-                        "entities": result.get("entities", []),
-                        "relations": result.get("relations", [])
-                    }
-        except json.JSONDecodeError as je:
-            print(f"JSON 解析錯誤: {je}")
+        # 關係去重
+        seen_relations = set()
+        unique_relations = []
+        for rel in all_relations:
+            key = (rel.get("from", ""), rel.get("to", ""), rel.get("relation", ""))
+            if key not in seen_relations:
+                seen_relations.add(key)
+                unique_relations.append(rel)
+        
+        print(f"📊 總計提取: {len(unique_entities)} 個實體, {len(unique_relations)} 個關係")
+        
+        if unique_entities:
+            return {
+                "entities": unique_entities,
+                "relations": unique_relations
+            }
         
     except Exception as e:
         print(f"LLM 提取知識失敗: {e}")
+        import traceback
+        traceback.print_exc()
     
     # 回退到基於文檔名的模擬數據
     safe_name = document_name[:15].replace('.pdf', '')
@@ -448,15 +503,13 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
     """上傳並處理 PDF 文件"""
     
     if not file.filename.lower().endswith('.pdf'):
-        return {"success": False, "error": "僅支援 PDF 文件"}
+        return {"success": False, "error": "只支援 PDF 文件"}
     
     try:
         # 讀取文件內容
         pdf_content = await file.read()
         
         # === 新增：儲存 PDF 到 uploads/ 資料夾 ===
-        import os
-        from pathlib import Path
         uploads_dir = Path(__file__).parent / "uploads"
         uploads_dir.mkdir(exist_ok=True)
         
@@ -486,21 +539,22 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
             "processed_at": datetime.datetime.now().isoformat()
         }
         
-        # 存儲到 SQLite 知識庫
+        # 存儲到 SQLite 資料庫
         try:
             from knowledge_storage import get_knowledge_storage
             storage = get_knowledge_storage()
             storage.save_knowledge(
                 doc_id=document_id,
                 filename=file.filename,
-                text=text[:5000],  # 只存儲前 5000 字符
+                text=text[:5000],  # 只儲存前 5000 字符
                 entities=entities,
                 relations=relations
             )
         except Exception as storage_error:
             print(f"知識存儲警告: {storage_error}")
         
-        # === 新增：存入向量資料庫 ===
+        # === 新增：向量化到向量庫 ===
+        vectors_count = 0
         try:
             from vector_storage import get_vector_storage
             vector_storage = get_vector_storage()
@@ -517,10 +571,11 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
                 relation["document_id"] = document_id
                 vectors.append(vector_storage.embed_relation(relation))
             
-            # 批量存入向量
+            # 批次存入向量庫
             if vectors:
                 vector_storage.upsert_vectors(vectors)
-                print(f"[Vector] 已存入 {len(vectors)} 個向量到 Qdrant")
+                vectors_count = len(vectors)
+                print(f"[Vector] 已新增 {vectors_count} 個向量到 Qdrant")
                 
         except Exception as vector_error:
             print(f"向量存儲警告: {vector_error}")
@@ -532,8 +587,8 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
             "text_length": len(text),
             "entities": entities,
             "relations": relations,
-            "vectors_count": len(vectors) if 'vectors' in dir() else 0,
-            "message": f"成功處理文件，提取了 {len(entities)} 個實體，已存入向量資料庫"
+            "vectors_count": vectors_count,
+            "message": f"已處理文件，提取到 {len(entities)} 個實體，已存入向量庫"
         }
         
     except Exception as e:
@@ -544,6 +599,7 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
 
 
 @app.get("/api/documents")
+
 async def get_documents():
     """獲取已上傳的文檔列表"""
     return {
@@ -561,7 +617,7 @@ async def get_documents():
 
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str):
-    """刪除文檔（從內存、SQLite、Qdrant 和 uploads 資料夾）"""
+    """刪除文檔（同時從 SQLite、Qdrant 和 uploads 資料夾刪除）"""
     try:
         # 從內存刪除
         if doc_id in uploaded_documents:
@@ -590,21 +646,22 @@ async def delete_document(doc_id: str):
             from pathlib import Path
             uploads_dir = Path(__file__).parent / "uploads"
             if uploads_dir.exists():
-                # 搜尋符合 doc_id 開頭的文件
+                # 查找符合 doc_id 開頭的文件
                 for pdf_file in uploads_dir.glob(f"{doc_id}_*"):
                     pdf_file.unlink()
                     print(f"[Uploads] 已刪除 PDF 文件: {pdf_file.name}")
         except Exception as e:
             print(f"[Uploads] PDF 文件刪除失敗: {e}")
         
-        return {"success": True, "message": f"已刪除文檔 {doc_id}（含知識圖譜、向量和 PDF 文件）"}
+        return {"success": True, "message": f"已刪除文檔 {doc_id}（含向量、知識和 PDF 文件）"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 @app.get("/api/knowledge-graph")
+
 async def get_knowledge_graph():
-    """獲取知識圖譜數據（含 Qdrant 向量統計）"""
+    """獲取知識圖譜資料（含 Qdrant 向量統計）"""
     all_nodes = []
     all_edges = []
     
@@ -960,7 +1017,9 @@ if __name__ == "__main__":
         print("⚠️  模擬模式啟用中 - AI 回應為模擬內容")
     else:
         print("[Agent] AI Agent 模組已載入")
-    print(f"📡 伺服器地址: http://localhost:8765")
+    print(f"📡 伺服器地址: http://localhost:{PORT}") # Updated to use args.port
     print("🌐 開啟瀏覽器訪問上述地址開始聊天")
     print("=" * 50)
-    uvicorn.run(app, host="0.0.0.0", port=8765)
+    print(f"[Knowledge] Available tools: knowledge_search, get_all_knowledge, get_knowledge_summary, check_knowledge_exists")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
+

@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from knowledge_storage import get_knowledge_storage
+# 添加父目錄到路徑以導入 vector_storage
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from vector_storage import get_vector_storage
 
 mcp = FastMCP(name="KnowledgeTool")
 SERVER_PORT = 8022
@@ -31,6 +34,7 @@ class SearchResult(BaseModel):
     keyword: str = ""
     entities: list = []
     relations: list = []
+    chunks: list = []
     total: int = 0
 
 
@@ -47,30 +51,45 @@ async def knowledge_search(
     keyword: str = Field(..., description="要搜尋的關鍵字，用於在知識庫中查找相關實體和關係")
 ) -> dict:
     """
-    【精確搜尋】在知識庫中搜尋精確關鍵字，返回完全匹配的實體和關係。
+    【混合搜尋】結合關鍵字搜尋與向量語義搜尋。
     
-    適用場景：
-    - 用戶指定了具體的名詞或關鍵字
-    - 需要查找特定實體的詳細信息
-    - 需要精確匹配而非模糊搜尋
+    搜尋流程：
+    1. 在知識庫中搜尋精確關鍵字 (SQLite)
+    2. 在向量資料庫中搜尋語義相關內容 (Qdrant)
+    3. 合併結果返回
     
-    例如：
-    - 「Python 這個實體的描述是什麼?」→ 只返回名稱包含 Python 的實體
-    - 「查詢'機器學習'的所有關係」→ 只返回包含這個關鍵字的關係
-    
-    注意：這是關鍵字匹配，只返回包含精確關鍵字的結果。
-    如需語義相關搜尋，請使用 vector_search。
+    這樣既能找到明確的實體關係，也能找到語義相關的文本片段。
     """
     try:
-        storage = get_knowledge_storage()
-        results = storage.search_knowledge(keyword)
+        results = {}
         
+        # 1. 關鍵字搜尋 (Graph)
+        try:
+            storage = get_knowledge_storage()
+            graph_results = storage.search_knowledge(keyword)
+            results["entities"] = graph_results.get("entities", [])
+            results["relations"] = graph_results.get("relations", [])
+        except Exception as e:
+            print(f"[Knowledge] Graph search failed: {e}")
+            results["entities"] = []
+            results["relations"] = []
+            
+        # 2. 向量搜尋 (Vector)
+        vector_results = []
+        try:
+            vector_storage = get_vector_storage()
+            # 搜尋相關文檔塊
+            vector_results = vector_storage.search(keyword, limit=5)
+        except Exception as e:
+            print(f"[Knowledge] Vector search failed: {e}")
+            
         return SearchResult(
             type="text",
             keyword=keyword,
             entities=results.get("entities", []),
             relations=results.get("relations", []),
-            total=results.get("total", 0)
+            chunks=vector_results,
+            total=len(results.get("entities", [])) + len(results.get("relations", [])) + len(vector_results)
         ).model_dump()
         
     except Exception as e:

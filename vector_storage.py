@@ -144,6 +144,21 @@ class VectorStorage:
                 "text": text
             }
         }
+
+    def embed_document_chunk(self, chunk_text: str, doc_id: str, chunk_index: int) -> Dict:
+        """對文檔塊產生 embedding"""
+        embeddings = self.embed_texts([chunk_text], input_type="document")
+        
+        return {
+            "id": str(uuid.uuid4()),
+            "vector": embeddings[0],
+            "payload": {
+                "type": "document_chunk",
+                "document_id": doc_id,
+                "chunk_index": chunk_index,
+                "text": chunk_text
+            }
+        }
     
     def upsert_vectors(self, vectors: List[Dict]) -> bool:
         """批量存入向量"""
