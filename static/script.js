@@ -241,31 +241,29 @@ function renderDocumentList() {
 }
 
 /**
- * 創建文件元素
+ * 創建文件元素（統一樣式）
  */
 function createDocumentElement(doc) {
     const div = document.createElement('div');
     div.className = 'document-item';
     div.id = `doc-${doc.id}`;
 
-    const statusClass = doc.status === 'completed' ? 'status-completed' :
-        doc.status === 'error' ? 'status-error' : 'status-pending';
-    const statusText = doc.status === 'completed' ? '已處理' :
+    const statusText = doc.status === 'completed' ? '已完成' :
         doc.status === 'error' ? '處理失敗' :
             doc.status === 'processing' ? '處理中...' : '待處理';
 
     div.innerHTML = `
+        <div class="document-icon">📄</div>
         <div class="document-info">
-            <span class="document-icon">📄</span>
-            <div class="document-details">
-                <span class="document-name">${doc.name}</span>
-                <span class="document-size">${formatFileSize(doc.size)}</span>
-            </div>
+            <div class="document-name">${escapeHtml(doc.name)}</div>
+            <div class="document-meta">${formatFileSize(doc.size)}</div>
         </div>
-        <div class="document-status ${statusClass}">${statusText}</div>
-        <button class="document-action delete-btn" onclick="removeDocument('${doc.id}')" title="刪除">
-            <span>🗑️</span>
-        </button>
+        <div class="document-status">
+            <span class="status-badge ${doc.status}">${statusText}</span>
+        </div>
+        <div class="document-actions">
+            <button class="action-btn delete" onclick="removeDocument('${doc.id}')" title="刪除">🗑️</button>
+        </div>
     `;
 
     return div;
@@ -316,19 +314,28 @@ function addDocumentToList(file) {
  * 渲染文件項目
  */
 function renderDocumentItem(doc) {
-    // 嘗試多種選擇器找到容器
-    let container = document.getElementById('documentItems');
+    // 直接使用 documentList 作為容器（根據實際 DOM 結構）
+    let container = document.getElementById('documentList');
+
+    // 備用選擇器
+    if (!container) {
+        container = document.getElementById('documentItems');
+    }
+    if (!container) {
+        container = document.querySelector('.document-list');
+    }
     if (!container) {
         container = document.querySelector('.document-items');
     }
-    if (!container) {
-        container = document.querySelector('#uploadView .document-items');
-    }
 
     if (!container) {
-        console.error('[PDF] 找不到 documentItems 容器元素');
+        console.error('[PDF] 找不到文件列表容器');
         return;
     }
+
+    // 隱藏空狀態
+    const emptyState = document.getElementById('emptyDocState');
+    if (emptyState) emptyState.style.display = 'none';
 
     const itemHtml = `
         <div class="document-item" id="${doc.id}">
@@ -354,13 +361,17 @@ function renderDocumentItem(doc) {
 
 /**
  * 更新文件狀態顯示
+ * @param {string} docId - 文件 ID
+ * @param {string} status - 狀態 (pending/processing/completed/error)
+ * @param {number} progress - 進度百分比 (0-100)
+ * @param {string} message - 可選的詳細訊息
  */
-function updateDocumentStatus(docId, status, progress = 0) {
+function updateDocumentStatus(docId, status, progress = 0, message = '') {
     const doc = uploadedDocuments.find(d => d.id === docId);
-    if (!doc) return;
-
-    doc.status = status;
-    doc.progress = progress;
+    if (doc) {
+        doc.status = status;
+        doc.progress = progress;
+    }
 
     const item = document.getElementById(docId);
     if (!item) return;
@@ -369,22 +380,31 @@ function updateDocumentStatus(docId, status, progress = 0) {
     const progressBar = item.querySelector('.progress-bar');
     const progressFill = item.querySelector('.progress-fill');
 
-    badge.className = `status-badge ${status}`;
-    badge.textContent = getStatusText(status);
+    if (badge) {
+        badge.className = `status-badge ${status}`;
+        // 如果有訊息且狀態是 processing，顯示詳細訊息；否則顯示狀態文字
+        if (message && status === 'processing') {
+            badge.textContent = message;
+        } else {
+            badge.textContent = getStatusText(status);
+        }
+    }
 
-    if (status === 'processing') {
+    if (status === 'processing' && progressBar && progressFill) {
         progressBar.style.display = 'block';
         progressFill.style.width = `${progress}%`;
-    } else {
+    } else if (progressBar) {
         progressBar.style.display = 'none';
     }
 }
 
 /**
  * 上傳並處理文件
+ * 注意：實際進度更新由 WebSocket 的 upload_progress 訊息處理
  */
 async function uploadAndProcessDocument(doc) {
-    updateDocumentStatus(doc.id, 'processing', 10);
+    // 初始狀態 - 實際進度會由 WebSocket 即時更新
+    updateDocumentStatus(doc.id, 'processing', 0, '準備上傳...');
 
     try {
         // 創建 FormData 上傳文件
@@ -392,22 +412,17 @@ async function uploadAndProcessDocument(doc) {
         formData.append('file', doc.file);
         formData.append('document_id', doc.id);
 
-        updateDocumentStatus(doc.id, 'processing', 20);
-
-        // 發送到後端 API
+        // 發送到後端 API - 進度會透過 WebSocket 即時推送
         const response = await fetch('/api/upload-pdf', {
             method: 'POST',
             body: formData
         });
-
-        updateDocumentStatus(doc.id, 'processing', 50);
 
         if (!response.ok) {
             throw new Error(`上傳失敗: ${response.status}`);
         }
 
         const result = await response.json();
-        updateDocumentStatus(doc.id, 'processing', 80);
 
         // 如果成功提取了知識，添加到圖譜
         if (result.success && result.entities) {
@@ -418,7 +433,11 @@ async function uploadAndProcessDocument(doc) {
             );
         }
 
-        updateDocumentStatus(doc.id, 'completed', 100);
+        // HTTP 回應完成時，WebSocket 應該已經發送了 completed 狀態
+        // 這裡做最終確認
+        if (result.success) {
+            updateDocumentStatus(doc.id, 'completed', 100, '處理完成');
+        }
 
         // 更新文檔的提取結果
         const docObj = uploadedDocuments.find(d => d.id === doc.id);
@@ -428,9 +447,95 @@ async function uploadAndProcessDocument(doc) {
 
     } catch (error) {
         console.error('處理文件失敗:', error);
-        updateDocumentStatus(doc.id, 'error', 0);
+        updateDocumentStatus(doc.id, 'error', 0, error.message);
     }
 }
+
+/**
+ * 處理上傳進度 WebSocket 訊息
+ */
+function handleUploadProgress(data) {
+    const { doc_id, status, progress, message, total_chunks, current_chunk } = data;
+
+    console.log(`[Upload Progress] 收到進度: ${doc_id}: ${progress}% - ${message}`);
+
+    // 嘗試找到對應的 DOM 元素
+    let item = document.getElementById(doc_id);
+    console.log(`[Upload Progress] DOM 元素是否存在: ${item ? '是' : '否'}, ID: ${doc_id}`);
+
+    // 如果找不到元素，嘗試在 documentList 容器中創建一個
+    if (!item) {
+        let container = document.getElementById('documentList');
+        if (!container) container = document.getElementById('documentItems');
+        if (container) {
+            // 隱藏空狀態
+            const emptyState = document.getElementById('emptyDocState');
+            if (emptyState) emptyState.style.display = 'none';
+
+            // 從 uploadedDocuments 找到文件名（如果有的話）
+            const docInfo = uploadedDocuments.find(d => d.id === doc_id);
+            const fileName = docInfo ? docInfo.name : '處理中...';
+            const fileSize = docInfo ? formatFileSize(docInfo.size) : '';
+
+            // 創建新的進度項目
+            const itemHtml = `
+                <div class="document-item" id="${doc_id}">
+                    <div class="document-icon">📄</div>
+                    <div class="document-info">
+                        <div class="document-name">${escapeHtml(fileName)}</div>
+                        <div class="document-meta">${fileSize}</div>
+                    </div>
+                    <div class="document-status">
+                        <span class="status-badge processing">${message || '處理中'}</span>
+                        <div class="progress-bar" style="display: block">
+                            <div class="progress-fill" style="width: ${progress}%"></div>
+                        </div>
+                    </div>
+                    <div class="document-actions">
+                        <button class="action-btn delete" onclick="removeDocument('${doc_id}')" title="刪除">🗑️</button>
+                    </div>
+                </div>
+            `;
+            container.insertAdjacentHTML('beforeend', itemHtml);
+            item = document.getElementById(doc_id);
+            console.log(`[Upload Progress] 已動態創建 DOM 元素: ${doc_id}`);
+        }
+    }
+
+    // 更新對應文件的進度顯示
+    updateDocumentStatus(doc_id, status, progress, message);
+
+    // 如果有分塊信息，可以顯示更詳細的進度
+    if (total_chunks > 0 && current_chunk > 0) {
+        updateDocumentChunkInfo(doc_id, current_chunk, total_chunks);
+    }
+}
+
+/**
+ * 更新文件的分塊處理信息
+ */
+function updateDocumentChunkInfo(docId, currentChunk, totalChunks) {
+    const item = document.getElementById(docId);
+    if (!item) return;
+
+    // 找到或創建分塊信息顯示元素
+    let chunkInfo = item.querySelector('.chunk-info');
+    if (!chunkInfo) {
+        const statusDiv = item.querySelector('.document-status');
+        if (statusDiv) {
+            chunkInfo = document.createElement('div');
+            chunkInfo.className = 'chunk-info';
+            chunkInfo.style.cssText = 'font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;';
+            statusDiv.appendChild(chunkInfo);
+        }
+    }
+
+    if (chunkInfo) {
+        chunkInfo.textContent = `區塊 ${currentChunk}/${totalChunks}`;
+    }
+}
+
+
 
 
 /**
@@ -782,15 +887,19 @@ function initGraph() {
                 updateInterval: 25
             },
             barnesHut: {
-                gravitationalConstant: -3000,
-                centralGravity: 0.3,
-                springConstant: 0.02,
-                springLength: 150,
-                damping: 0.4,
-                avoidOverlap: 0.5
+                gravitationalConstant: -2000,  // 減少引力，讓節點更分散
+                centralGravity: 0.1,           // 降低中心引力，允許更自由漂移
+                springConstant: 0.01,          // 降低彈簧常數，更柔和的連接
+                springLength: 180,             // 增加預設連線長度
+                damping: 0.15,                 // 降低阻尼，讓運動更緩慢平滑
+                avoidOverlap: 0.3
             },
-            minVelocity: 0.75
+            minVelocity: 0.1,                  // 極低的最小速度，讓節點緩慢漂移直到自然停止
+            maxVelocity: 30,                   // 限制最大速度
+            solver: 'barnesHut',
+            timestep: 0.5                      // 較慢的時間步長，運動更平滑
         },
+
         interaction: {
             tooltipDelay: 100,
             hover: true,
@@ -901,22 +1010,35 @@ function addKnowledgeToGraph(documentName, entities, relations) {
         }
     });
 
-    // 如果圖譜已初始化，動態添加
+    // 如果圖譜已初始化，動態添加（檢查是否已存在）
     if (graphData && graphData.nodes) {
-        const docNode = extractedKnowledge.nodes[extractedKnowledge.nodes.length - entities.length - 1];
-        graphData.nodes.add(docNode);
+        try {
+            const docNode = extractedKnowledge.nodes[extractedKnowledge.nodes.length - entities.length - 1];
+            // 檢查節點是否已存在
+            if (docNode && !graphData.nodes.get(docNode.id)) {
+                graphData.nodes.add(docNode);
+            }
 
-        entities.forEach((entity, i) => {
-            const node = extractedKnowledge.nodes[extractedKnowledge.nodes.length - entities.length + i];
-            graphData.nodes.add(node);
-        });
+            entities.forEach((entity, i) => {
+                const node = extractedKnowledge.nodes[extractedKnowledge.nodes.length - entities.length + i];
+                // 檢查節點是否已存在
+                if (node && !graphData.nodes.get(node.id)) {
+                    graphData.nodes.add(node);
+                }
+            });
 
-        extractedKnowledge.edges.slice(-relations.length - entities.length).forEach(edge => {
-            graphData.edges.add(edge);
-        });
+            extractedKnowledge.edges.slice(-relations.length - entities.length).forEach(edge => {
+                // 檢查邊是否已存在
+                if (!graphData.edges.get(edge.id)) {
+                    graphData.edges.add(edge);
+                }
+            });
 
-        if (network) {
-            network.fit();
+            if (network) {
+                network.fit();
+            }
+        } catch (e) {
+            console.warn('[Graph] 添加節點時發生非關鍵錯誤:', e.message);
         }
     }
 
@@ -1189,8 +1311,8 @@ function handleServerMessage(data) {
             break;
 
         case 'tool_response':
-            // 工具回應 - 顯示完成狀態
-            showToolResponse(data.name);
+            // 工具回應 - 標記工具完成
+            markToolComplete(data.name);
             break;
 
         case 'error':
@@ -1200,6 +1322,11 @@ function handleServerMessage(data) {
 
         case 'pong':
             // 心跳回應
+            break;
+
+        case 'upload_progress':
+            // 文件上傳進度更新
+            handleUploadProgress(data);
             break;
     }
 }
@@ -1445,30 +1572,87 @@ function hideTypingIndicator() {
 }
 
 /**
- * 顯示工具狀態
+ * 顯示工具使用狀態 (在當前 assistant 訊息下方)
+ * @param {string} toolName - 工具名稱
+ * @param {string} args - 工具參數 (可選)
  */
-function showToolStatus(message) {
-    let statusDiv = document.getElementById('toolStatus');
+function showToolStatus(toolName, args = '') {
+    // 找到當前的 assistant 訊息，或創建一個新的
+    let targetMessage = currentAssistantMessage;
 
-    if (!statusDiv) {
-        statusDiv = document.createElement('div');
-        statusDiv.id = 'toolStatus';
-        statusDiv.className = 'tool-status';
-        document.getElementById('chatMessages').appendChild(statusDiv);
+    if (!targetMessage) {
+        // 如果沒有當前訊息，找最後一個 assistant 訊息
+        const messages = document.querySelectorAll('.message.assistant');
+        if (messages.length > 0) {
+            targetMessage = messages[messages.length - 1];
+        }
     }
 
-    statusDiv.innerHTML = message;
+    if (!targetMessage) {
+        // 還是沒有就創建一個
+        targetMessage = createAssistantMessage();
+        currentAssistantMessage = targetMessage;
+    }
+
+    // 查找或創建工具指示器容器
+    let indicatorsContainer = targetMessage.querySelector('.tool-indicators');
+    if (!indicatorsContainer) {
+        indicatorsContainer = document.createElement('div');
+        indicatorsContainer.className = 'tool-indicators';
+        targetMessage.appendChild(indicatorsContainer);
+    }
+
+    // 檢查該工具是否已存在
+    const existingIndicator = indicatorsContainer.querySelector(`[data-tool="${toolName}"]`);
+    if (existingIndicator) {
+        // 如果存在，更新參數顯示
+        return;
+    }
+
+    // 創建新的工具指示器
+    const indicator = document.createElement('div');
+    indicator.className = 'tool-indicator';
+    indicator.setAttribute('data-tool', toolName);
+    indicator.innerHTML = `
+        <span class="tool-icon">⚡</span>
+        <span class="tool-text">正在使用 ${escapeHtml(toolName)}</span>
+    `;
+
+    indicatorsContainer.appendChild(indicator);
     scrollToBottom();
 }
 
 /**
- * 隱藏工具狀態
+ * 標記工具完成
+ * @param {string} toolName - 工具名稱
+ */
+function markToolComplete(toolName) {
+    const indicator = document.querySelector(`.tool-indicator[data-tool="${toolName}"]`);
+    if (indicator) {
+        indicator.classList.add('completed');
+        indicator.querySelector('.tool-icon').textContent = '✓';
+        indicator.querySelector('.tool-text').textContent = `${toolName} 完成`;
+
+        // 3 秒後淡出移除
+        setTimeout(() => {
+            indicator.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+            indicator.style.opacity = '0';
+            indicator.style.transform = 'scale(0.8)';
+            setTimeout(() => indicator.remove(), 500);
+        }, 2000);
+    }
+}
+
+/**
+ * 隱藏所有工具狀態
  */
 function hideToolStatus() {
-    const status = document.getElementById('toolStatus');
-    if (status) {
-        status.remove();
-    }
+    const indicators = document.querySelectorAll('.tool-indicators');
+    indicators.forEach(container => {
+        container.style.transition = 'opacity 0.3s ease';
+        container.style.opacity = '0';
+        setTimeout(() => container.remove(), 300);
+    });
 }
 
 /**

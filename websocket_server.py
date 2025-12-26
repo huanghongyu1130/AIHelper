@@ -143,6 +143,39 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# ========== 上傳進度追蹤 ==========
+upload_progress: Dict[str, dict] = {}  # doc_id -> {"status", "progress", "message", "total_chunks", "current_chunk"}
+
+
+async def broadcast_upload_progress(doc_id: str, status: str, progress: int, message: str = "", 
+                                     total_chunks: int = 0, current_chunk: int = 0):
+    """廣播上傳進度到所有連接的 WebSocket 客戶端"""
+    print(f"[Progress] 廣播進度: {doc_id} -> {progress}% - {message}")
+    
+    upload_progress[doc_id] = {
+        "doc_id": doc_id,
+        "status": status,
+        "progress": progress,
+        "message": message,
+        "total_chunks": total_chunks,
+        "current_chunk": current_chunk
+    }
+    
+    # 向所有活躍連接廣播進度
+    progress_msg = {
+        "type": "upload_progress",
+        **upload_progress[doc_id]
+    }
+    
+    active_count = len(manager.active_connections)
+    print(f"[Progress] 活躍連接數: {active_count}")
+    
+    for client_id, ws in list(manager.active_connections.items()):
+        try:
+            await ws.send_json(progress_msg)
+            print(f"[Progress] ✓ 已發送到 {client_id}")
+        except Exception as e:
+            print(f"[Progress] ✗ 發送到 {client_id} 失敗: {e}")
 
 async def mock_ai_response(user_message: str, send_func):
     """
@@ -322,8 +355,15 @@ def extract_text_from_pdf(pdf_content: bytes) -> str:
     return ""
 
 
-async def extract_knowledge_with_llm(text: str, document_name: str) -> dict:
-    """使用 LLM 從文本中提取知識 (實體和關係) - 支援分塊處理長文檔"""
+async def extract_knowledge_with_llm(text: str, document_name: str, doc_id: str = None, progress_callback = None) -> dict:
+    """使用 LLM 從文本中提取知識 (實體和關係) - 支援分塊處理長文檔
+    
+    Args:
+        text: 要處理的文本
+        document_name: 文檔名稱
+        doc_id: 文檔 ID (用於進度追蹤)
+        progress_callback: 進度回調函數 (async)，接收 (current_chunk, total_chunks, message)
+    """
     
     if MOCK_MODE or not text.strip():
         # 模擬模式：根據文檔名稱生成模擬知識
@@ -354,7 +394,12 @@ async def extract_knowledge_with_llm(text: str, document_name: str) -> dict:
             chunks.append(chunk)
         start = end - CHUNK_OVERLAP  # 重疊以避免在實體中間切斷
     
-    print(f"📄 文檔分成 {len(chunks)} 個塊進行處理")
+    total_chunks = len(chunks)
+    print(f"📄 文檔分成 {total_chunks} 個塊進行處理")
+    
+    # 通知進度：開始分塊處理
+    if progress_callback:
+        await progress_callback(0, total_chunks, f"開始處理，共 {total_chunks} 個區塊")
     
     # 收集所有 chunks 的提取結果
     all_entities = []
@@ -387,7 +432,12 @@ async def extract_knowledge_with_llm(text: str, document_name: str) -> dict:
         
         # 處理每個 chunk
         for i, chunk in enumerate(chunks):
-            print(f"  處理第 {i+1}/{len(chunks)} 塊...")
+            current_chunk = i + 1
+            print(f"  處理第 {current_chunk}/{total_chunks} 塊...")
+            
+            # 通知進度
+            if progress_callback:
+                await progress_callback(current_chunk, total_chunks, f"正在處理第 {current_chunk}/{total_chunks} 塊...")
             
             prompt = f"""請從以下文本中提取知識圖譜信息。
 請全面提取文中出現的所有重要實體(概念、技術、人物、組織、方法等)以及它們之間的關係。
@@ -506,6 +556,9 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
         return {"success": False, "error": "只支援 PDF 文件"}
     
     try:
+        # 廣播進度：開始上傳
+        await broadcast_upload_progress(document_id, "processing", 5, "正在讀取文件...")
+        
         # 讀取文件內容
         pdf_content = await file.read()
         
@@ -518,17 +571,44 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
             f.write(pdf_content)
         print(f"[PDF] 已儲存到: {pdf_path}")
         
+        # 廣播進度：提取文字
+        await broadcast_upload_progress(document_id, "processing", 15, "正在提取文字...")
+        
         # 提取文字
         if PDF_SUPPORT:
             text = extract_text_from_pdf(pdf_content)
         else:
             text = f"[PDF 處理庫未安裝，無法提取文字。文件名: {file.filename}]"
         
-        # 使用 LLM 提取知識
-        knowledge = await extract_knowledge_with_llm(text, file.filename)
+        # 廣播進度：開始知識提取
+        await broadcast_upload_progress(document_id, "processing", 20, "正在進行知識提取...")
+        
+        # 定義進度回調函數
+        async def progress_callback(current_chunk: int, total_chunks: int, message: str):
+            # 知識提取佔 20% - 80% 的進度
+            base_progress = 20
+            chunk_progress = 60  # 60% 用於知識提取
+            if total_chunks > 0:
+                progress = base_progress + int((current_chunk / total_chunks) * chunk_progress)
+            else:
+                progress = base_progress
+            await broadcast_upload_progress(
+                document_id, "processing", progress, message,
+                total_chunks=total_chunks, current_chunk=current_chunk
+            )
+        
+        # 使用 LLM 提取知識 (帶進度回調)
+        knowledge = await extract_knowledge_with_llm(
+            text, file.filename, 
+            doc_id=document_id, 
+            progress_callback=progress_callback
+        )
         
         entities = knowledge.get("entities", [])
         relations = knowledge.get("relations", [])
+        
+        # 廣播進度：儲存知識
+        await broadcast_upload_progress(document_id, "processing", 85, "正在儲存知識...")
         
         # 存儲到內存
         uploaded_documents[document_id] = {
@@ -552,6 +632,9 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
             )
         except Exception as storage_error:
             print(f"知識存儲警告: {storage_error}")
+        
+        # 廣播進度：向量化
+        await broadcast_upload_progress(document_id, "processing", 90, "正在向量化...")
         
         # === 新增：向量化到向量庫 ===
         vectors_count = 0
@@ -580,6 +663,12 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
         except Exception as vector_error:
             print(f"向量存儲警告: {vector_error}")
         
+        # 廣播進度：完成
+        await broadcast_upload_progress(
+            document_id, "completed", 100, 
+            f"處理完成！提取到 {len(entities)} 個實體, {len(relations)} 個關係"
+        )
+        
         return {
             "success": True,
             "document_id": document_id,
@@ -595,6 +684,8 @@ async def upload_pdf(file: UploadFile = File(...), document_id: str = Form(...))
         import traceback
         print(f"PDF 處理錯誤: {e}")
         traceback.print_exc()
+        # 廣播錯誤狀態
+        await broadcast_upload_progress(document_id, "error", 0, f"處理失敗: {str(e)}")
         return {"success": False, "error": str(e)}
 
 

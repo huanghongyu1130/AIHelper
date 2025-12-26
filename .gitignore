@@ -1,5 +1,7 @@
 # 環境變數文件（包含敏感金鑰）
 .env
+.knowledge.db
+
 
 # Python
 __pycache__/
@@ -45,7 +47,7 @@ Thumbs.db
 logs/
 
 # 上傳的文件（可選）
-# uploads/
+uploads/
 
 # 資料庫
 *.db

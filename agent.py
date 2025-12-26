@@ -219,19 +219,64 @@ def cb_after_tool(
     在 Tool.run_async 完成並取得 tool_output 後觸發。
     簽名: (BaseTool, dict[str,Any], ToolContext) -> Optional[dict[str,Any]]
     回傳 None 表示保留原本 tool_output；回傳 dict 可修改最終返回給 LLM 的 tool_output。
+    
+    特殊處理：如果工具回傳包含 screenshot (Base64)，會轉換成 types.Part 讓 LLM 能「看到」圖片。
     """
     ts = datetime.datetime.now()
     tool_name = getattr(tool, "name", "unknown_tool")
-    old_ts = log_records[-1]["Timestamp"]
+    old_ts = log_records[-1]["Timestamp"] if log_records else ts
+    
+    # 處理截圖：將 Base64 轉換成 types.Part
+    modified_response = None
+    if isinstance(tool_response, dict):
+        # 檢查回應中是否有 screenshot 欄位 (可能在 result 內或直接在 tool_response)
+        screenshot_b64 = None
+        result_data = tool_response.get("result", tool_response)
+        
+        if isinstance(result_data, dict):
+            screenshot_b64 = result_data.get("screenshot")
+        
+        if screenshot_b64 and isinstance(screenshot_b64, str):
+            try:
+                # 將 Base64 解碼成 bytes
+                screenshot_bytes = base64.b64decode(screenshot_b64)
+                
+                # 建立 types.Part 物件
+                screenshot_part = types.Part(
+                    inline_data=types.Blob(
+                        data=screenshot_bytes,
+                        mime_type="image/png"
+                    )
+                )
+                
+                # 修改回應，加入 screenshot_part 並移除原始 Base64 (避免重複大量資料)
+                modified_response = tool_response.copy()
+                if "result" in modified_response and isinstance(modified_response["result"], dict):
+                    modified_response["result"] = modified_response["result"].copy()
+                    modified_response["result"]["screenshot_part"] = screenshot_part
+                    # 截短 Base64 避免 log 過大
+                    modified_response["result"]["screenshot"] = f"[圖片已轉換為 Part，大小: {len(screenshot_bytes)} bytes]"
+                else:
+                    modified_response["screenshot_part"] = screenshot_part
+                    modified_response["screenshot"] = f"[圖片已轉換為 Part，大小: {len(screenshot_bytes)} bytes]"
+                
+                print(f"[Callback] 已將 {tool_name} 的截圖轉換為 types.Part (大小: {len(screenshot_bytes)} bytes)")
+                
+            except Exception as e:
+                print(f"[Callback] 截圖轉換失敗: {e}")
+    
+    # 記錄 log (使用修改後或原始的回應)
+    log_response = modified_response if modified_response else tool_response
     log_records.append({
         "Stage": "after_tool",
         "Timestamp": ts,
         "Cost_Time": f"{(ts - old_ts).total_seconds():.6f} 秒",
         "Prompt": "",
         "Model_Response": "",
-        "Tool": f"接收到工具回應 {tool_name}，接收回應 : {tool_response}",
+        "Tool": f"接收到工具回應 {tool_name}，接收回應 : {str(log_response)[:500]}...",  # 截短避免 log 過大
     })
-    return None  # 不修改 Tool 返回結果
+    
+    return modified_response  # 回傳修改後的結果，或 None 保持原樣
 
 
 # --- Step 1: Agent Definition ---
@@ -270,9 +315,13 @@ async def get_agent_async(conversation_id: str):
 
     root_agent = LlmAgent(
         model=MODEL,
-        name="GOOGLE好朋友",
+        name="黃泓瑜",
         instruction="""
 你是一位擅長使用工具的助手。請注意每個訊息的新鮮度與現在時間，回答時不用再提及現在時間。
+使用工具時必須謹慎 且你可以多次使用工具
+例如:
+用WebSearch工具後
+會取得大量的網址，你可以查看複數個你覺得有相關的網址
 
 ## 知識搜尋工具使用指南
 
@@ -305,12 +354,12 @@ async def get_agent_async(conversation_id: str):
             ) for tool_name, _, tool_py_loc, current_port in mcp_server_port
         ],
 
-        # before_agent_callback=cb_before_agent,
-        # after_agent_callback=cb_after_agent,
-        # before_model_callback=cb_before_model,
-        # after_model_callback=cb_after_model,
-        # before_tool_callback=cb_before_tool,
-        # after_tool_callback=cb_after_tool
+        before_agent_callback=cb_before_agent,
+        after_agent_callback=cb_after_agent,
+        before_model_callback=cb_before_model,
+        after_model_callback=cb_after_model,
+        before_tool_callback=cb_before_tool,
+        after_tool_callback=cb_after_tool  # 啟用：處理截圖轉換
     )
 
     return root_agent

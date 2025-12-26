@@ -13,6 +13,7 @@ import re
 import json
 import asyncio
 import logging
+import base64
 from typing import Any, Literal
 from urllib.parse import urljoin, urlparse
 
@@ -62,6 +63,7 @@ class ExtractResult(BaseModel):
     content: str = Field(..., description="Markdown 格式的主要內容")
     links: list[LinkItem] = []
     metadata: dict | None = None
+    screenshot: str | None = Field(None, description="網頁截圖的 Base64 編碼 (PNG)")
     error: str | None = None
 
 # =========================
@@ -142,8 +144,12 @@ async def prepare_page(page: Page) -> None:
     except Exception:
         pass
 
-async def fetch_html(url: str) -> tuple[str, str, str | None]:
-    """獲取渲染後的 HTML (重用瀏覽器)。"""
+async def fetch_html(url: str, capture_screenshot: bool = True) -> tuple[str, str, str | None, str | None]:
+    """獲取渲染後的 HTML (重用瀏覽器)。
+    
+    Returns:
+        tuple: (html, final_url, title, screenshot_base64)
+    """
     browser = await BrowserManager.get_browser()
     # 每個請求使用獨立 Context 以隔離 Cookie/Storage
     context = await browser.new_context(
@@ -152,16 +158,18 @@ async def fetch_html(url: str) -> tuple[str, str, str | None]:
         locale="zh-TW"
     )
     
-    # 攔截不必要的資源請求
+    # 攔截不必要的資源請求 (截圖時需要圖片，所以不攔截 image)
+    block_types = BLOCK_TYPES - {"image"} if capture_screenshot else BLOCK_TYPES
     await context.route(
         "**/*",
-        lambda r: (r.abort() if r.request.resource_type in BLOCK_TYPES else r.continue_()),
+        lambda r: (r.abort() if r.request.resource_type in block_types else r.continue_()),
     )
 
     page = await context.new_page()
     final_url = url
     title = None
     html = ""
+    screenshot_base64 = None
     
     try:
         # 漸進式載入策略
@@ -178,13 +186,31 @@ async def fetch_html(url: str) -> tuple[str, str, str | None]:
         title = await page.title()
         html = await page.content()
         
+        # 截圖功能
+        if capture_screenshot:
+            try:
+                # 回到頁面頂部
+                await page.evaluate("window.scrollTo(0, 0)")
+                await asyncio.sleep(0.3)  # 等待滾動完成
+                
+                # 截取全頁面截圖 (限制最大高度避免記憶體問題)
+                screenshot_bytes = await page.screenshot(
+                    type="png",
+                    full_page=False,  # 只截取可視區域，避免過大
+                    # 如需全頁面截圖可設為 True，但可能會很大
+                )
+                screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+                logger.info(f"Screenshot captured, size: {len(screenshot_base64)} chars")
+            except Exception as e:
+                logger.warning(f"Failed to capture screenshot: {e}")
+        
     except Exception as e:
         logger.error(f"Error fetching {url}: {e}")
         raise e
     finally:
         await context.close()
         
-    return html, final_url, title
+    return html, final_url, title, screenshot_base64
 
 # =========================
 # 內容處理邏輯
@@ -278,15 +304,16 @@ mcp = FastMCP(name="WebFullExtractMCP")
 
 @mcp.tool(name="web_extract_tool")
 async def web_extract_tool(
-    url: str = Field(..., description="目標網頁連結")
+    url: str = Field(..., description="目標網頁連結"),
+    capture_screenshot: bool = Field(True, description="是否擷取網頁截圖 (會回傳 Base64 編碼的 PNG)")
 ):
     """
     智能網頁全文抽取工具。
     會自動切換為「文章模式」或「索引頁模式」，並過濾廣告與雜訊。
-    返回結構包含：標題、Markdown 正文、與正文相關的精選連結。
+    返回結構包含：標題、Markdown 正文、與正文相關的精選連結、以及網頁截圖。
     """
     try:
-        html, final_url, title = await fetch_html(url)
+        html, final_url, title, screenshot_base64 = await fetch_html(url, capture_screenshot)
     except Exception as e:
         return ExtractResult(url=url, content="", error=f"Fetch failed: {str(e)}").model_dump()
 
@@ -313,8 +340,8 @@ async def web_extract_tool(
         meta_json = extract(html, options=xtr, include_links=False, url=base_url)
         if meta_json:
             meta = json.loads(meta_json)
-    except:
-        pass
+    except Exception as e:
+        logger.debug(f"Metadata extraction failed: {e}")
 
     # 2. 如果 Trafilatura 失敗，使用 ReadabiliPy fallback
     if not md_text or len(md_text) < 100:
@@ -324,8 +351,8 @@ async def web_extract_tool(
             if content_html:
                 md_text = md(content_html)
                 if not title: title = sj.get("title")
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"ReadabiliPy fallback failed: {e}")
 
     # 3. 如果還是空的，直接把 body 轉 markdown (最糟情況)
     if not md_text:
@@ -360,7 +387,8 @@ async def web_extract_tool(
         mode="article" if is_article else "hub",
         content=md_text or "(No Content Extracted)",
         links=filtered_links,
-        metadata=meta
+        metadata=meta,
+        screenshot=screenshot_base64
     ).model_dump()
 
 if __name__ == "__main__":
