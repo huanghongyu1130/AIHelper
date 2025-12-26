@@ -674,10 +674,24 @@ function switchView(viewName) {
     // 根據視圖類型執行對應操作
     if (viewName === 'graph') {
         // 切換到圖譜時，重新從 SQL 載入最新數據
-        loadStoredKnowledge();
+        // 使用 .then() 確保在 initGraph 完成後才啟用鍵盤控制
+        loadStoredKnowledge().then(() => {
+            if (network) {
+                network.setOptions({ interaction: { keyboard: true } });
+            }
+        });
     } else if (viewName === 'upload') {
         // 切換到上傳頁面時，重新載入文件列表
         loadUploadedDocuments();
+        // 關閉圖譜鍵盤控制
+        if (network) {
+            network.setOptions({ interaction: { keyboard: false } });
+        }
+    } else {
+        // 其他視圖（如對話）也關閉圖譜鍵盤控制
+        if (network) {
+            network.setOptions({ interaction: { keyboard: false } });
+        }
     }
 }
 
@@ -906,7 +920,7 @@ function initGraph() {
             hideEdgesOnDrag: false,
             hideEdgesOnZoom: false,
             navigationButtons: true,
-            keyboard: true,
+            keyboard: false,
             dragNodes: true,
             dragView: true
         },

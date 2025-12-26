@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import json
 import os
+import geocoder
 from pathlib import Path
 from typing import Dict, List
 from Tool.text_processing import recursive_character_text_splitter
@@ -961,9 +962,9 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                                 print(f"[Image] 已添加圖片到請求 ({mime_type}, {len(encoded)} chars)")
                             except Exception as img_error:
                                 print(f"[Image] 處理圖片失敗: {img_error}")
-                    
+                    area_imformation = geocoder.ip('me')
                     # 添加文字 part（附加時間戳）
-                    query = user_message + f" now_time : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    query = user_message + f" now_time : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, area : {area_imformation.country}, {area_imformation.city}"
                     parts.append(types.Part(text=query))
                     
                     content = types.Content(
